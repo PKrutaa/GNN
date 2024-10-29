@@ -14,7 +14,13 @@ import xgboost as xgb
 from sklearn.metrics import accuracy_score, classification_report
 
 # Carregar o dataset de transações de cartão e amostrar 100 registros aleatórios
-df = pd.read_csv(r"C:\Users\Pedro Kruta\Desktop\Zoox\NVIDIA\card_transaction.csv").sample(n=100, random_state=13)
+df = pd.read_csv(r"C:\Users\Pedro Kruta\Desktop\Zoox\NVIDIA\card_transaction.v1.csv")
+# Filtrar dados não fraudulentos e fraudulentos
+df_non_fraud = df[df["Is Fraud?"] == 0].sample(n=73000, random_state=13)
+df_fraud = df[df["Is Fraud?"] == 1].sample(n=27000, random_state=13)
+
+# Concatenar os dados não fraudulentos e fraudulentos
+df = pd.concat([df_non_fraud, df_fraud]).sample(frac=1, random_state=13).reset_index(drop=True)
 
 # Criar uma nova coluna 'card_id' combinando 'User' e 'Card' como string
 df["card_id"] = df["User"].astype(str) + "_" + df["Card"].astype(str)
@@ -36,7 +42,7 @@ df["Errors?"] = df["Errors?"].fillna("No error")
 df = df.drop(columns=["Merchant State", "Zip"], axis=1)
 
 # Converter a coluna 'Is Fraud?' para valores binários (1 para 'Yes', 0 para 'No')
-df["Is Fraud?"] = df["Is Fraud?"] = df["Is Fraud?"].apply(lambda x: 1 if x == 'Yes' else 0)
+df["Is Fraud?"] = df["Is Fraud?"].apply(lambda x: 1 if x == 'Yes' else 0)
 
 # Aplicar LabelEncoder para converter valores categóricos em numéricos nas colunas selecionadas
 df["Merchant City"] = LabelEncoder().fit_transform(df["Merchant City"])
@@ -88,17 +94,18 @@ class FraudDetectionGNN(nn.Module):
 model = FraudDetectionGNN(in_channels=6, hidden_channels=64, out_channels=32)
 
 # Função de treinamento
-def train(model, features, adjacency_matrix, labels, epochs=201):
+def train(model, features, adjacency_matrix, labels, epochs=100):
     optimizer = optim.Adam(model.parameters(), lr=0.001, weight_decay=5e-4)
     model.train()
+
+    labeled_nodes = [i for i, node in enumerate(G.nodes) if node in df['card_id'].values]
+    labeled_features = features[labeled_nodes]
+    labeled_labels = labels[labeled_nodes]
 
     for epoch in range(epochs):
         optimizer.zero_grad()
         out = model(features, adjacency_matrix).squeeze()  # Ajustar a saída para remover dimensões extras
-        # Ajustar rótulos para corresponder ao número total de nós
-        adjusted_labels = torch.zeros(out.size(0))
-        adjusted_labels[:labels.size(0)] = labels.float()
-        loss = F.mse_loss(out, adjusted_labels)  # Usar MSE para treinar o modelo a gerar embeddings úteis
+        loss = F.mse_loss(out[labeled_nodes], labeled_labels.float())  # Usar apenas os nós rotulados para calcular a perda
         loss.backward()
         optimizer.step()
 
@@ -117,11 +124,13 @@ train(model, features, adjacency_matrix, labels)
 embeddings = get_node_embeddings(model, G)
 embeddings_np = embeddings.numpy()  # Converter para NumPy
 
-# Salvar os embeddings em um arquivo .npy
-np.save('embeddings.npy', embeddings_np)
-print("Embeddings gerados pelos nós:", embeddings)
+# Filtrar os embeddings e rótulos para apenas os nós rotulados
+labeled_nodes = [i for i, node in enumerate(G.nodes) if node in df['card_id'].values]
+embeddings_np_labeled = embeddings_np[labeled_nodes]
+labels_labeled = labels[labeled_nodes].numpy()
 
-X_train, X_test, y_train, y_test = train_test_split(embeddings_np, labels.numpy(), test_size=0.2, random_state=42)
+# Dividir os embeddings em treino e teste
+X_train, X_test, y_train, y_test = train_test_split(embeddings_np_labeled, labels_labeled, test_size=0.2, random_state=42)
 
 # Treinar o modelo XGBoost
 xgb_model = xgb.XGBClassifier(objective='binary:logistic', n_estimators=100, learning_rate=0.1, max_depth=5)
@@ -134,4 +143,5 @@ y_pred = xgb_model.predict(X_test)
 accuracy = accuracy_score(y_test, y_pred)
 print(f'Acurácia do modelo XGBoost: {accuracy * 100:.2f}%')
 print(classification_report(y_test, y_pred))
+
 
