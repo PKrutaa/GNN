@@ -2,7 +2,7 @@ import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
 from collections import Counter
-from sklearn.model_selection import train_test_split
+from sklearn.model_selection import train_test_split, cross_val_score
 from sklearn.preprocessing import LabelEncoder
 import networkx as nx
 import torch
@@ -13,8 +13,15 @@ import torch.optim as optim
 import xgboost as xgb
 from sklearn.metrics import accuracy_score, classification_report
 
-# Carregar o dataset de transações de cartão e amostrar 100 registros aleatórios
-df = pd.read_csv(r"C:\Users\Pedro Kruta\Desktop\Zoox\NVIDIA\card_transaction.v1.csv").sample(n=1000000, random_state=13)
+# Carregar o dataset de transações de cartão
+df = pd.read_csv(r"C:\Users\Pedro Kruta\Desktop\Zoox\NVIDIA\credit_card_transactions-ibm_v2.csv").sample(n=100000, random_state=46)
+
+# # Filtrar registros não fraudulentos e fraudulentos
+# non_fraudulent = df[df["Is Fraud?"] == 'No'].sample(n=27000, random_state=45)
+# fraudulent = df[df["Is Fraud?"] == 'Yes'].sample(n=27000, replace=True, random_state=45)
+
+# # Concatenar os dois DataFrames
+# df = pd.concat([non_fraudulent, fraudulent])
 
 # Criar uma nova coluna 'card_id' combinando 'User' e 'Card' como string
 df["card_id"] = df["User"].astype(str) + "_" + df["Card"].astype(str)
@@ -36,7 +43,7 @@ df["Errors?"] = df["Errors?"].fillna("No error")
 df = df.drop(columns=["Merchant State", "Zip"], axis=1)
 
 # Converter a coluna 'Is Fraud?' para valores binários (1 para 'Yes', 0 para 'No')
-df["Is Fraud?"] = df["Is Fraud?"] = df["Is Fraud?"].apply(lambda x: 1 if x == 'Yes' else 0)
+df["Is Fraud?"] = df["Is Fraud?"].apply(lambda x: 1 if x == 'Yes' else 0)
 
 # Aplicar LabelEncoder para converter valores categóricos em numéricos nas colunas selecionadas
 df["Merchant City"] = LabelEncoder().fit_transform(df["Merchant City"])
@@ -88,13 +95,13 @@ class FraudDetectionGNN(nn.Module):
 model = FraudDetectionGNN(in_channels=6, hidden_channels=64, out_channels=32)
 
 # Função de treinamento
-def train(model, features, adjacency_matrix, labels, epochs=201):
+def train(model, features, adjacency_matrix, labels, epochs=50):
     optimizer = optim.Adam(model.parameters(), lr=0.001, weight_decay=5e-4)
     model.train()
 
     labeled_nodes = [i for i, node in enumerate(G.nodes) if node in df['card_id'].values]
     labeled_features = features[labeled_nodes]
-    labeled_labels = labels[:len(labeled_nodes)]
+    labeled_labels = labels[labeled_nodes]
 
     for epoch in range(epochs):
         optimizer.zero_grad()
@@ -121,13 +128,19 @@ embeddings_np = embeddings.numpy()  # Converter para NumPy
 # Filtrar os embeddings e rótulos para apenas os nós rotulados
 labeled_nodes = [i for i, node in enumerate(G.nodes) if node in df['card_id'].values]
 embeddings_np_labeled = embeddings_np[labeled_nodes]
-labels_labeled = labels[:len(labeled_nodes)].numpy()
+labels_labeled = labels[labeled_nodes].numpy()
 
 # Dividir os embeddings em treino e teste
-X_train, X_test, y_train, y_test = train_test_split(embeddings_np_labeled, labels_labeled, test_size=0.2, random_state=42)
+X_train, X_test, y_train, y_test = train_test_split(embeddings_np_labeled, labels_labeled, test_size=0.1, random_state=42, stratify=labels_labeled)
 
 # Treinar o modelo XGBoost
-xgb_model = xgb.XGBClassifier(objective='binary:logistic', n_estimators=100, learning_rate=0.1, max_depth=5)
+xgb_model = xgb.XGBClassifier(objective='binary:logistic', n_estimators=500, learning_rate=0.05, max_depth=4, scale_pos_weight=50, reg_alpha=10, reg_lambda=1)
+
+# Validação cruzada do modelo XGBoost
+scores = cross_val_score(xgb_model, X_train, y_train, cv=5, scoring='accuracy')
+print(f'Validação cruzada - Acurácia média: {np.mean(scores) * 100:.2f}%')
+
+# Ajustar o modelo aos dados de treinamento
 xgb_model.fit(X_train, y_train)
 
 # Fazer previsões
@@ -135,5 +148,14 @@ y_pred = xgb_model.predict(X_test)
 
 # Avaliar o desempenho do modelo
 accuracy = accuracy_score(y_test, y_pred)
+if '1' in classification_report(y_test, y_pred, output_dict=True):
+    precision = classification_report(y_test, y_pred, output_dict=True)['1']['precision']
+else:
+    precision = 0.0
+if '1' in classification_report(y_test, y_pred, output_dict=True):
+    recall = classification_report(y_test, y_pred, output_dict=True)['1']['recall']
+else:
+    recall = 0.0
 print(f'Acurácia do modelo XGBoost: {accuracy * 100:.2f}%')
-print(classification_report(y_test, y_pred))
+print(f'Precisão: {precision:.2f}')
+print(f'Recall: {recall:.2f}')
